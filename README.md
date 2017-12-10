@@ -14,11 +14,14 @@ This script looks for its config file in `~/.genitools/scrotum.conf`.
 #### Script to Upload, Paste, and Shorten URLs using Teknik services.
 
 This script looks for its config file in `~/.genitools/shaft.conf`.
+
 If you intend to upload files from Standard input and wish for the files to have the correct extension, download `shaft-mime-list.txt` into `~/.genitools/shaft-mime-list.txt`.
+
 If you this script to log all uploads, run `touch ~/.genitools/shaft.log` to create the log file.
 
 ## glans
 #### Script to browse the shaft upload log using a dzen window.
 
-This script looks for its config file in `~/.genitools/glans.conf`
+This script looks for its config file in `~/.genitools/glans.conf`.
+
 By default it will look for the log in `~/.genitools/shaft.log`, unless a log file is specified as an argument.
