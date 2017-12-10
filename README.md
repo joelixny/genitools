@@ -15,9 +15,9 @@ This script looks for its config file in `~/.genitools/scrotum.conf`.
 
 This script looks for its config file in `~/.genitools/shaft.conf`.
 
-If you intend to upload files from Standard input and wish for the files to have the correct extension, download `shaft-mime-list.txt` into `~/.genitools/shaft-mime-list.txt`.
+If you intend to upload files from Standard input (e.g. `foo | shaft`) and wish for the files to have the correct extension, download `shaft-mime-list.txt` into `~/.genitools/shaft-mime-list.txt`.
 
-If you this script to log all uploads, run `touch ~/.genitools/shaft.log` to create the log file.
+If you want this script to log all uploads, run `touch ~/.genitools/shaft.log` to create the log file.
 
 ## glans
 #### Script to browse the shaft upload log using a dzen window.

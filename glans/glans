@@ -119,7 +119,7 @@ preview(){ # Create a dzen preview message
 }
 
 # Setting defaults
-FONT_NAME="${grep '^[^!].*font' .Xresources | sed 's/.*: //'}"
+FONT_NAME="$(grep '^[^!].*font' .Xresources | sed 's/.*: //')"
 FORMAT="xpm"
 BACKGROUND="#222222"
 FOREGROUND="#a2bbca"

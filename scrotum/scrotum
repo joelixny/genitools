@@ -106,7 +106,7 @@ ACTION=saved
 DIRECTORY=.
 SIZE=10
 FORMAT=xpm
-FONT_NAME="${grep '^[^!].*font' .Xresources | sed 's/.*: //'}"
+FONT_NAME="$(grep '^[^!].*font' .Xresources | sed 's/.*: //')"
 GENITOOLS_DIRECTORY=${HOME?/}/.genitools
 CONFIG_FILE=${GENITOOLS_DIRECTORY}/scrotum.conf
 
