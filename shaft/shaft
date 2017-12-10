@@ -1,0 +1,387 @@
+#!/usr/bin/env bash
+
+### Shaft
+#
+# Script to use Teknik services, such as upload, paste, and URL shortening.
+#
+# Requires: curl, jq, [openssl], [xxd], [xsel], and bash.
+#
+###
+
+help(){ # Display the help message
+    echo "Shaft - script to use Teknik services, such as upload, paste, and URL shortening."
+    echo "Usage: ${0##/*/} [options] FILE|URL # Defaults to shortening URLs or uploading FILEs"
+    echo "Usage: ${0##/*/} [options] < data   # Defaults to pasting the data"
+    echo "Usage: cmd | ${0##/*/} [options]    # Defaults to pasting cmd's output"
+    echo "                                # General options"
+    echo "-c |--clipboard                 Copy URL to clipboard instead of printing, requires xsel"
+    echo "-cp|--clipboard-print           Copies to clipboard and prints, --clipboard overrides this"
+    echo "-p |--paste                     Override mode to pasting"
+    echo "-u |--upload                    Override mode to uploading"
+    echo "-s |--shorten                   Override mode to shortening"
+    echo "-R |--response                  Show the json response from the server"
+    echo "-nt|--do-not-track              Tells Teknik to not track, in accordance to the privacy policy"
+    echo "-l |--login (user) (password)   Authenticate to your Teknik account"
+    echo "                                # Paste options"
+    echo "-r |--raw                       Gives link to raw paste, default if no paste options are set"
+    echo "-nr|--no-raw                    Gives link to normal paste, default if any paste option is set"
+    echo "-t |--title (title)             Title for the paste file"
+    echo "-S |--syntax (syntax)           Selects the syntax for the paste"
+    echo "-P |--password (password)       Password to lock the paste"
+    echo "-H |--hide                      Hides paste from public list"
+    echo "-eu|--expire-unit (unit)        Unit for expiration time, can be: view, minute, hour, day, month, or year"
+    echo "-el|--expire-length (length)    Length for expiration, both length and unit are required"
+    echo "                                # Upload options"
+    echo "-se|--server-encrypt            Encrypt files on Teknik, default option"
+    echo "-ne|--no-server-encrypt         Don't encrypt files on Teknik"
+    echo "-sd|--server-decrypt            Decrypt files on Teknik, default option, no key will be asked to view the file"
+    echo "-nd|--no-server-decrypt         Don't decrypt files on Teknik, a key will be asked to view the file if encrypted"
+    echo "-ce|--client-encrypt            Encrypt the file before uploading, requires OpenSSL"
+    echo "-ks|--key-size (128|192|256)    Sets the key size in bits"
+    echo "-ft|--file-type                 Sets the file mime type, will attempt to detect automatically if not supplied"
+}
+
+to_pipe(){ # Detect if standard output is a pipe
+    [[ -p /dev/stdout ]] && return 0 || return 1
+}
+
+read_stdin(){ # Read the standard input
+    # Check if there's any data to read
+    read -t0 EMPTY || return 128
+    # Create a temp file if told to upload
+    if [[ "${ACTION}" == "upload" ]]; then
+        cat /dev/stdin > .tmp.shaft
+        TMP_FILE=.tmp.shaft
+        FILE=${TMP_FILE}
+        return 0
+    fi
+    # Set standard input to be pasted, or shotened if specified
+    IFS= read -r -d '' PIPE
+    [[ -z "${PIPE}" ]] && return 2
+    if [[ "${ACTION}" == "shorten" ]]; then
+        LONG_URL="${PIPE}"
+    else
+        PASTE="${PIPE}"
+    fi
+}
+
+get_path(){ # Get an absolute path for file to be uploaded
+    if [ -d "${1}" ]; then
+        (cd "${1}"; pwd)
+    elif [ -f "${1}" ]; then
+        if [[ $1 = /* ]]; then
+            echo "${1}"
+        elif [[ $1 == */* ]]; then
+            echo "$(cd "${1%/*}"; pwd)/${1##*/}"
+        else
+            echo "$(pwd)/${1}"
+        fi
+    fi
+}
+
+log_upload(){ # Prepare and log into the predefined log file
+    # If log variables have already been prepared, write to the log
+    if [[ ${FILE_NAME} ]] && [[ ${URL} ]]; then
+        local DELETE_KEY=$(jq -r '.result.deletionKey' <<< ${RESPONSE})
+        local SERVER_FILE_NAME=$(jq -r '.result.fileName' <<< ${RESPONSE})
+        echo "$(date +%s) | file: ${FILE_NAME} | url: ${URL} | delete: https://u.teknik.io/${SERVER_FILE_NAME}/${DELETE_KEY}" >> ${LOG_FILE}
+    else # Prepare the log variables
+        if [[ ${TMP_FILE} ]]; then
+            FILE_NAME="Standard input"
+        else
+            FILE_NAME=$(get_path ${FILE})
+        fi
+        UPLOAD_OPTS+=( -F 'genDeletionKey=true' )
+    fi
+}
+
+detect_type(){ # Detect the file's mime type
+    read FILE_TYPE <<< $(file -b --mime-type ${FILE})
+    [[ ! -z "${FILE_TYPE}" ]] && UPLOAD_OPTS+=( -F "contentType=${FILE_TYPE}" )
+}
+
+encrypt(){ # Encrypts the file before upload
+    # Check if an extension has been generated, if not, extract it
+    [[ -z ${EXTENSION} ]] && EXTENSION=$([[ "${FILE}" = *.* ]] && echo ".${FILE##*.}" || echo '')
+    # Generate a key and an iv
+    KEY=$(head -c 500 /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w ${KEY_SIZE} | head -n 1)
+    IV=$(head -c 500 /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w ${IV_SIZE} | head -n 1)
+    UPLOAD_OPTS+=( -F "key=${KEY}" -F "iv=${IV}" )
+    # Encrypt the file and save the output in a temp file
+    openssl enc -aes-$((${KEY_SIZE}*8))-ctr -in ${FILE} -out .tmp.shaft.enc${EXTENSION} -K $( echo -n ${KEY} | xxd -c ${KEY_SIZE} -p ) -iv $( echo -n ${IV} | xxd -c ${IV_SIZE} -p ) >/dev/null
+    # Check if encryption was successful
+    if [[ ${?} -ne 0 ]]; then
+        echo "Encryption failed. Make sure you have OpenSSL installed and options are correct." >&2
+        rm .tmp.shaft.enc${EXTENSION} >/dev/null
+        exit 4
+    fi
+    # Delete old temp file if it existed, and set the encrypted file to the new temp file
+    [[ ${TMP_FILE} ]] && rm ${TMP_FILE}
+    TMP_FILE=.tmp.shaft.enc${EXTENSION}
+    FILE=${TMP_FILE}
+}
+
+upload(){ # Uploads the file
+    # Try to detect the mime type if not supplied
+    [[ -z ${FILE_TYPE} ]] && detect_type
+    # Try to find an extension for the temp file based on the mime type from a predefined list
+    if [[ ${TMP_FILE} ]]; then
+        if [ -f ${HOME?/}/.config/shaft-mime-list.txt ]; then
+            source ${HOME?/}/.config/shaft-mime-list.txt
+            EXTENSION=${MIME_LIST[$FILE_TYPE]}
+            [[ ${EXTENSION} ]] && mv "${TMP_FILE}" "${TMP_FILE}${EXTENSION}"
+            [[ ${EXTENSION} ]] && TMP_FILE=${TMP_FILE}${EXTENSION}
+            [[ ${EXTENSION} ]] && FILE=${TMP_FILE}
+        else
+            echo "You need to have the shaft-mime-list.txt file inside of" >&2
+            echo "${HOME?/}/.config/ for pipe uploads to have proper extensions" >&2
+        fi
+    fi
+    # If the log file is writable, prepare the log variables
+    [[ -w ${LOG_FILE} ]] && log_upload
+    # Encrypt the file if told to
+    [[ ${CLIENT_ENCRYPT} ]] && encrypt
+    # Upload the file
+    RESPONSE=$(curl -s "${CURL_OPTS[@]}" "${UPLOAD_OPTS[@]}" -F "file=@${FILE}" ${UPLOAD_API})
+    # Show the json response if told to
+    [[ ${SHOW_RESPONSE} ]] && echo -n ${RESPONSE} | jq
+    # Check if the upload failed
+    if [[ -z ${RESPONSE} || "${RESPONSE}" != *'http'* || "${RESPONSE}" = *'error'* ]]; then
+        echo "Error uploading: ${FILE}" >&2
+        echo "$(jq -r '.error.message' <<< "${RESPONSE}")" >&2
+        [[ ${TMP_FILE} ]] && rm ${TMP_FILE}
+        exit 3
+    fi
+    # Get the URL from the json response
+    URL=$(jq -r '.result.url' <<< ${RESPONSE})
+    # If the log file is writable, write to it
+    [[ -w ${LOG_FILE} ]] && log_upload
+    # If a temp file exists, delete it
+    [[ ${TMP_FILE} ]] && rm ${TMP_FILE}
+}
+clipboard(){ # Copy URL to clipboard and primary select buffer
+    echo -n ${URL} | xsel -p
+    echo -n ${URL} | xsel -b
+    xsel -k
+}
+
+paste(){ # Paste standard input or file
+    # Get text from file if specified to paste from file
+    [[ -z ${PASTE} ]] && _PASTE=$(cat ${FILE}; echo x) && PASTE=${_PASTE%x}
+    # Paste text
+    RESPONSE=$(curl -s "${PASTE_OPTS[@]}" "${CURL_OPTS[@]}" --data-urlencode "code=${PASTE}" ${PASTE_API})
+    # Show the json response if told to
+    [[ ${SHOW_RESPONSE} ]] && echo -n ${RESPONSE} | jq
+    # Check if the paste failed
+    if [[ -z ${RESPONSE} || "${RESPONSE}" != *'http'* || "${RESPONSE}" = *'error'* ]]; then
+        echo "Error pasting" >&2
+        echo "$(jq -r '.error.message' <<< "${RESPONSE}")" >&2
+    fi
+    # Get the paste ID
+    local PASTE_ID=$(jq -r '.result.id' <<< ${RESPONSE})
+    # If neither the --raw or --no-raw options are selected, use raw if no other paste option was set
+    if [[ -z ${RAW_PASTE} ]] && [[ -z ${NO_RAW_PASTE} ]]; then
+        [[ ${PASTE_OPTS} ]] && NO_RAW_PASTE=true || RAW_PASTE=true
+    fi
+    [[ ${RAW_PASTE} ]]    && URL=https://p.teknik.io/Raw/${PASTE_ID}
+    [[ ${NO_RAW_PASTE} ]] && URL=https://p.teknik.io/${PASTE_ID}
+}
+
+shorten(){ # Shortens URLs
+    # Shorten the URL
+    RESPONSE=$(curl -s "${CURL_OPTS[@]}" --data-urlencode "url=${LONG_URL}" ${SHORTEN_API})
+    # Show the json response if told to
+    [[ ${SHOW_RESPONSE} ]] && echo -n ${RESPONSE} | jq
+    # Check if shortening failed
+    if [[ -z ${RESPONSE} || "${RESPONSE}" != *'http'* || "${RESPONSE}" = *'error'* ]]; then
+        echo "Error shortening" >&2
+        echo "$(jq -r '.error.message' <<< "${RESPONSE}")" >&2
+    fi
+    # Get the short URL
+    URL=$(jq -r '.result.shortUrl' <<< ${RESPONSE})
+}
+
+# Setting defaults
+UPLOAD_API="https://api.teknik.io/v1/Upload"
+PASTE_API="https://api.teknik.io/v1/Paste"
+SHORTEN_API="https://api.teknik.io/v1/Shorten"
+
+URL_REGEX='(https?|ftp|file)://[-A-Za-z0-9\+&@#/%?=~_|!:,.;]*[-A-Za-z0-9\+&@#/%=~_|]'
+
+CURL_OPTS=()
+PASTE_OPTS=()
+UPLOAD_OPTS=()
+GENITOOLS_DIRECTORY=${HOME?/}/.genitools
+LOG_FILE=${GENITOOLS_DIRECTORY}/shaft.log
+
+declare -i KEY_SIZE=32
+declare -i IV_SIZE=16
+
+# Parse arguments
+while [ "$#" -ne 0 ]; do
+    case ${1} in
+        -h|--help)
+            help
+            exit 0
+            ;;
+        -c|--clipboard)
+            CLIPBOARD=true
+            shift
+            ;;
+        -cp|--clipboard-print)
+            CLIPBOARD_PRINT=true
+            shift
+            ;;
+        -p|--paste)
+            ACTION=paste
+            shift
+            ;;
+        -u|--upload)
+            ACTION=upload
+            shift
+            ;;
+        -s|--shorten)
+            ACTION=shorten
+            shift
+            ;;
+        -R|--response)
+            SHOW_RESPONSE=true
+            shift
+            ;;
+        -nt|--do-not-track)
+            CURL_OPTS+=( -F "doNotTrack=true" )
+            shift
+            ;;
+        -t|--title)
+            PASTE_OPTS+=( --data "title=${2}" )
+            shift
+            shift
+            ;;
+        -r|--raw)
+            RAW_PASTE=true
+            unset NO_RAW_PASTE
+            shift
+            ;;
+        -nr|--no-raw)
+            NO_RAW_PASTE=true
+            unset RAW_PASTE
+            shift
+            ;;
+        -S|--syntax)
+            PASTE_OPTS+=( --data "syntax=${2}" )
+            shift
+            shift
+            ;;
+        -P|--password)
+            PASTE_OPTS+=( --data "password=${2}" )
+            shift
+            shift
+            ;;
+        -H|--hide)
+            PASTE_OPTS+=( --data "hide=true" )
+            shift
+            ;;
+        -eu|--expire-unit)
+            PASTE_OPTS+=( --data "expireUnit=${2}" )
+            shift
+            shift
+            ;;
+        -el|--expire-length)
+            PASTE_OPTS+=( --data "expireLength=${2}" )
+            shift
+            shift
+            ;;
+        -l|--login)
+            CURL_OPTS+=( -u "${2}:${3}" )
+            shift
+            shift
+            shift
+            ;;
+        -se|--server-encrypt)
+            UPLOAD_OPTS+=( -F "encrypt=true" )
+            SERVER_ENCRYPT=true
+            shift
+            ;;
+        -ne|--no-server-encrypt)
+            UPLOAD_OPTS+=( -F "encrypt=false" )
+            NO_SERVER_ENCRYPT=true
+            shift
+            ;;
+        -sd|--server-decrypt)
+            UPLOAD_OPTS+=( -F "saveKey=true" )
+            SERVER_DECRYPT=true
+            shift
+            ;;
+        -nd|--no-server-decrypt)
+            UPLOAD_OPTS+=( -F "saveKey=false" )
+            NO_SERVER_DECRYPT=true
+            shift
+            ;;
+        -ce|--client-encrypt)
+            UPLOAD_OPTS+=( -F "encrypt=false" )
+            CLIENT_ENCRYPT=true
+            shift
+            ;;
+        -ks|--key-size)
+            case ${2} in
+                128|192|256)
+                    KEY_SIZE=(${2}/8)
+                    UPLOAD_OPTS+=( -F "keySize=${2}" )
+                    ;;
+                *)
+                    echo "Unsupported key size, using default 256" >&2
+                    ;;
+            esac
+            shift
+            shift
+            ;;
+        -ft|--file-type)
+            FILE_TYPE="${2}"
+            UPLOAD_OPTS+=( -F "contentType=${FILE_TYPE}" )
+            shift
+            shift
+            ;;
+        *)
+            if [ -f "${1}" ]; then
+                FILE="${1}"
+            elif [[ ${1} =~ ${URL_REGEX} ]]; then
+                LONG_URL="${1}"
+            else
+                help
+                echo ""
+                echo "Error: File not found or invalid URL: ${1}"
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Check if standard input is a terminal, if not read from it
+read_stdin
+
+# If a mode has be specified, perform that action
+if [[ ${ACTION} ]]; then
+    ${ACTION}
+else # Follow default mode: Paste from standard input, Upload if argument is a file that exists, and Shorten if argument is a valid URL
+    if   [[ ${PASTE} ]]; then
+        paste
+    elif [[ -z ${FILE} ]] && [[ -z ${LONG_URL} ]]; then
+        help
+    elif [[ ${FILE} ]]; then
+        upload
+    elif [[ ${LONG_URL} ]]; then
+        shorten
+    fi
+fi
+
+# If clipboard option is set, copy URL to it
+if [[ ${CLIPBOARD} ]]; then
+    clipboard
+else # Send URL to standard output
+    # If --clipboard-print is set, also copy to clipboard
+    [[ ${CLIPBOARD_PRINT} ]] && clipboard
+    echo -n ${URL}
+    # If standard output is not a pipe, add a trailing line break
+    to_pipe || echo -e -n '\n'
+fi

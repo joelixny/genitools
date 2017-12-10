@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+
+### Scrotum
+#
+# Script to take screenshots and show a preview using dzen.
+#
+# Requires: scrot, dzen, ImageMagick, and bash.
+#
+###
+
+help(){ # Display the help message
+    echo "Scrotum - script to take screenshots with a dzen preview."
+    echo "Usage: ${0##/*/} [options]          # Takes a screenshot"
+    echo "Usage: ${0##/*/} (file) [options]   # Uses a local file"
+    echo "-d |--directory (dir)             Directory to store the screenshot"
+    echo "-f |--font (name)                 Name of the font to use"
+    echo "-fh|--font-height (height)        Font height in pixels !IMPORTANT!"
+    echo "-bg|--background (hex RGB)        Background color"
+    echo "-fg|--foreground (hex RGB)        Text color"
+    echo "-S |--size (percent)              Thumbnail size in percent points of the original"
+    echo "-t |--time (seconds)              Time the preview will be displayed"
+    echo "-F |--format (xpm|xbm)            Thumbnail format"
+    echo "-U |--shaft                       Upload screenshot or file to Teknik using shaft and copies link to clipboard"
+    echo "--                                Forward the rest of the arguments to shaft"
+    echo "                                  # Screenshot specific options"
+    echo "-s |--select                      Select region to screenshot"
+    echo "-u |--focused                     Screenshot focused window"
+}
+
+function_exists(){ # Check if a function exists
+    declare -f ${1} > /dev/null
+}
+
+get_font_height(){ # Get the font height from 
+	FONT_HEIGHT=$(echo "${FONT_NAME}" | sed 's/-\([^-]*\)-\([^-]*\)-\([^-]*\)-\([^-]*\)-\([^-]*\)-\([^-]*\)-\([^-]*\)-\([^-]*\)-\([^-]*\)-\([^-]*\)-\([^-]*\)-\([^-]*\)-\([^-]*\)-\([^-]*\)/\7/')
+}
+
+screenshot(){ # Take a screenshot
+    function_exists pre_screenshot  && pre_screenshot
+    read FILENAME <<< $(scrot "${SCROT_OPTS[@]}" -e 'echo $f')
+    function_exists post_screenshot && post_screenshot
+    OBJECT=Screenshot
+}
+
+upload(){ # Upload the screenshot or file using shaft
+    shaft --clipboard-print "${DIRECTORY?/}/${FILENAME}" "${SHAFT_OPTS[@]}"
+}
+
+preview(){ # Create a dzen preview message
+    # Create a thumbnail
+    function_exists pre_thumbnail  && pre_thumbnail
+    convert -resize ${SIZE}% ${FILENAME} thumb.${FORMAT}
+    local THUMBNAIL=thumb.${FORMAT}
+    function_exists post_thumbnail && post_thumbnail
+    
+    # Upload screenshot if specified
+    [[ ${UPLOAD} ]] && function_exists pre_upload  && pre_upload
+    [[ ${UPLOAD} ]] && upload
+    [[ ${UPLOAD} ]] && function_exists post_upload && post_upload
+    
+    # Get the dimensions of the thumbnail
+    local THUMBNAIL_HEIGHT=$(identify -format '%h' ${THUMBNAIL})
+    local THUMBNAIL_WIDTH=$(identify -format '%w' ${THUMBNAIL})
+    # Get the width of the screen
+    local SCREEN_WIDTH=$(xdpyinfo | grep dimensions | sed -r 's/^[^0-9]*([0-9]+)x([0-9]+).*$/\1/')
+
+    # Calculate the lines needed to display the message
+    local LINES=$(( (${THUMBNAIL_HEIGHT} + ${FONT_HEIGHT} + 1) / (${FONT_HEIGHT} + 2) + 1 ))
+    # Calculate the padding to be used
+    local PADDING=$(( (${LINES} - 1) * (${FONT_HEIGHT} + 2) - ${THUMBNAIL_HEIGHT} - 2 ))
+    # Calculate the horizontal padding to be used
+    local DZEN_WIDTH=$(( (${PADDING} + 1) * 2 + ${THUMBNAIL_WIDTH} ))
+    # Calculate the x offset of the message
+    local X_OFFSET=$(( ${SCREEN_WIDTH} - ${DZEN_WIDTH} - 5 ))
+
+    # Create the dzen message
+    function_exists pre_dzen  && pre_dzen
+    local ITER=$(( ${LINES} - 2 ))
+    (
+    echo "Scrotum"
+    echo "${OBJECT} ${ACTION}."
+    echo "^pa(;1)^i(${THUMBNAIL})"
+    for i in `seq 1 ${ITER}`; do
+        OFFSET=$(( ${i} * (${FONT_HEIGHT} + 2) ))
+        echo "^p(;-${OFFSET})^i(${THUMBNAIL})"
+    done
+    ) | dzen2 -p ${TIME}                                        \
+        $([[ -z "${BACKGROUND}" ]] || echo "-bg ${BACKGROUND}") \
+        $([[ -z "${FOREGROUND}" ]] || echo "-fg ${FOREGROUND}") \
+        $([[ -z "${FONT_NAME}"  ]] || echo "-fn ${FONT_NAME} ") \
+        -w  ${DZEN_WIDTH}                                       \
+        -l  ${LINES}                                            \
+        -x  ${X_OFFSET}                                         \
+        -y  "5"                                                 \
+        -ta "c"                                                 \
+        -sa "c"                                                 \
+        -e  "onstart=uncollapse;button1=exit;button3=exit"
+    function_exists post_dzen && post_dzen
+    rm ${THUMBNAIL}
+}
+
+# Setting defaults
+SCROT_OPTS=()
+SHAFT_OPTS=()
+ACTION=saved
+DIRECTORY=.
+SIZE=10
+FORMAT=xpm
+FONT_NAME="${grep '^[^!].*font' .Xresources | sed 's/.*: //'}"
+GENITOOLS_DIRECTORY=${HOME?/}/.genitools
+CONFIG_FILE=${GENITOOLS_DIRECTORY}/scrotum.conf
+
+declare -i FONT_HEIGHT=$(get_font_height)
+
+
+# Read the config file if available
+if [ -f ${CONFIG_FILE} ]; then
+    source ${CONFIG_FILE}
+fi
+
+# Handle arguments
+while [ "$#" -ne 0 ]; do
+    case ${1} in
+        -h|--help)
+            help
+            exit 0
+            ;;
+        -d|--directory)
+            DIRECTORY=${2}
+            shift
+            shift
+            ;;
+        -f|--font)
+            FONT_NAME=${2}
+			get_font_height
+            shift
+            shift
+            ;;
+        -fh|--font-height)
+            FONT_HEIGHT=${2}
+            shift
+            shift
+            ;;
+        -bg|--background)
+            BACKGROUND=${2}
+            shift
+            shift
+            ;;
+        -fg|--foreground)
+            FOREGROUND=${2}
+            shift
+            shift
+            ;;
+        -S|--size)
+            SIZE=${2}
+            shift
+            shift
+            ;;
+        -t|--time)
+            TIME=${2}
+            shift
+            shift
+            ;;
+        -F|--format)
+            FORMAT=${2}
+            shift
+            shift
+            ;;
+        -s|--select)
+            SCROT_OPTS+=( --select )
+            shift
+            ;;
+        -u|--focused)
+            SCROT_OPTS+=( --focused )
+            shift
+            ;;
+        -U|--shaft)
+            ACTION=uploaded
+            UPLOAD=true
+            shift
+            ;;
+        --)
+            shift
+            SHAFT_OPTS+=( ${@} )
+            shift ${#}
+            ;;
+        *)
+            if [ -f ${1} ]; then
+                OBJECT=File
+                FILENAME=${1}
+                DIRECTORY="$(pwd -P)"
+                ACTION=displayed
+                shift
+
+            else
+                help
+                echo ""
+                echo "File not found: ${1}"
+                exit 0
+            fi
+            ;;
+    esac
+done
+
+# Enter the directory
+cd ${DIRECTORY}
+
+# Perform required operations
+if [ -z ${FILENAME} ]; then
+    screenshot
+    preview
+else
+    preview
+fi
