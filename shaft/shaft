@@ -159,6 +159,7 @@ upload(){ # Uploads the file
     # If a temp file exists, delete it
     [[ ${TMP_FILE} ]] && rm ${TMP_FILE}
 }
+
 clipboard(){ # Copy URL to clipboard and primary select buffer
     echo -n ${URL} | xsel -p
     echo -n ${URL} | xsel -b
